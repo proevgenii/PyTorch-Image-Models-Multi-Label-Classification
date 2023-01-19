@@ -48,10 +48,13 @@ from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 from timm.utils import ApexScaler, NativeScaler
 
+from prepare_d_loader_kaggle import get_dataloaders
+
 try:
     from apex import amp
     from apex.parallel import DistributedDataParallel as ApexDDP
     from apex.parallel import convert_syncbn_model
+
     has_apex = True
 except ImportError:
     has_apex = False
@@ -71,7 +74,6 @@ _logger = logging.getLogger('train')
 config_parser = parser = argparse.ArgumentParser(description='Training Config', add_help=False)
 parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
                     help='YAML config file specifying default arguments')
-
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 
@@ -101,7 +103,8 @@ parser.add_argument('--gp', default=None, type=str, metavar='POOL',
 parser.add_argument('--img-size', type=int, default=None, metavar='N',
                     help='Image patch size (default: None => model default)')
 parser.add_argument('--input-size', default=None, nargs=3, type=int,
-                    metavar='N N N', help='Input all image dimensions (d h w, e.g. --input-size 3 224 224), uses model default if empty')
+                    metavar='N N N',
+                    help='Input all image dimensions (d h w, e.g. --input-size 3 224 224), uses model default if empty')
 parser.add_argument('--crop-pct', default=None, type=float,
                     metavar='N', help='Input image center crop percent (for validation only)')
 parser.add_argument('--mean', type=float, nargs='+', default=None, metavar='MEAN',
@@ -130,7 +133,6 @@ parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
                     help='Clip gradient norm (default: None, no clipping)')
 parser.add_argument('--clip-mode', type=str, default='norm',
                     help='Gradient clipping mode. One of ("norm", "value", "agc")')
-
 
 # Learning rate schedule parameters
 parser.add_argument('--sched', default='step', type=str, metavar='SCHEDULER',
@@ -171,7 +173,7 @@ parser.add_argument('--no-aug', action='store_true', default=False,
                     help='Disable all training augmentation, override other train aug args')
 parser.add_argument('--scale', type=float, nargs='+', default=[0.08, 1.0], metavar='PCT',
                     help='Random resize scale (default: 0.08 1.0)')
-parser.add_argument('--ratio', type=float, nargs='+', default=[3./4., 4./3.], metavar='RATIO',
+parser.add_argument('--ratio', type=float, nargs='+', default=[3. / 4., 4. / 3.], metavar='RATIO',
                     help='Random resize aspect ratio (default: 0.75 1.33)')
 parser.add_argument('--hflip', type=float, default=0.5,
                     help='Horizontal flip training aug probability')
@@ -488,14 +490,17 @@ def main():
     #     args.dataset, root=args.data_dir, split=args.train_split, is_training=True, batch_size=args.batch_size)
     # dataset_eval = create_dataset(
     #     args.dataset, root=args.data_dir, split=args.val_split, is_training=False, batch_size=args.batch_size)
+    # =======================
+    # =======================
+    #     dataset_train = DatasetML(train_path, attributes)
+    #     dataset_eval = DatasetML(val_path, attributes)
 
-    dataset_train = DatasetML(train_path, attributes)
-    dataset_eval = DatasetML(val_path, attributes)
-
-    num_of_data_train = len(dataset_train)
-    print('number of training data:', num_of_data_train)
-    num_of_data_val = len(dataset_eval)
-    print('number of validation data:', num_of_data_val)
+    #     num_of_data_train = len(dataset_train)
+    #     print('number of training data:', num_of_data_train)
+    #     num_of_data_val = len(dataset_eval)
+    #     print('number of validation data:', num_of_data_val)
+    # =======================
+    # =======================
     # ================================
 
     # setup mixup / cutmix
@@ -521,50 +526,55 @@ def main():
     train_interpolation = args.train_interpolation
     if args.no_aug or not train_interpolation:
         train_interpolation = data_config['interpolation']
-    loader_train = create_loader(
-        dataset_train,
-        input_size=data_config['input_size'],
-        batch_size=args.batch_size,
-        is_training=True,
-        use_prefetcher=args.prefetcher,
-        no_aug=args.no_aug,
-        re_prob=args.reprob,
-        re_mode=args.remode,
-        re_count=args.recount,
-        re_split=args.resplit,
-        scale=args.scale,
-        ratio=args.ratio,
-        hflip=args.hflip,
-        vflip=args.vflip,
-        color_jitter=args.color_jitter,
-        auto_augment=args.aa,
-        num_aug_splits=num_aug_splits,
-        interpolation=train_interpolation,
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=args.distributed,
-        collate_fn=collate_fn,
-        pin_memory=args.pin_mem,
-        use_multi_epochs_loader=args.use_multi_epochs_loader
-    )
+    # =======================
+    # =======================
+    #     loader_train = create_loader(
+    #         dataset_train,
+    #         input_size=data_config['input_size'],
+    #         batch_size=args.batch_size,
+    #         is_training=True,
+    #         use_prefetcher=args.prefetcher,
+    #         no_aug=args.no_aug,
+    #         re_prob=args.reprob,
+    #         re_mode=args.remode,
+    #         re_count=args.recount,
+    #         re_split=args.resplit,
+    #         scale=args.scale,
+    #         ratio=args.ratio,
+    #         hflip=args.hflip,
+    #         vflip=args.vflip,
+    #         color_jitter=args.color_jitter,
+    #         auto_augment=args.aa,
+    #         num_aug_splits=num_aug_splits,
+    #         interpolation=train_interpolation,
+    #         mean=data_config['mean'],
+    #         std=data_config['std'],
+    #         num_workers=args.workers,
+    #         distributed=args.distributed,
+    #         collate_fn=collate_fn,
+    #         pin_memory=args.pin_mem,
+    #         use_multi_epochs_loader=args.use_multi_epochs_loader
+    #     )
 
-    loader_eval = create_loader(
-        dataset_eval,
-        input_size=data_config['input_size'],
-        batch_size=args.validation_batch_size_multiplier * args.batch_size,
-        is_training=False,
-        use_prefetcher=args.prefetcher,
-        interpolation=data_config['interpolation'],
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=args.distributed,
-        crop_pct=data_config['crop_pct'],
-        pin_memory=args.pin_mem,
-    )
+    #     loader_eval = create_loader(
+    #         dataset_eval,
+    #         input_size=data_config['input_size'],
+    #         batch_size=args.validation_batch_size_multiplier * args.batch_size,
+    #         is_training=False,
+    #         use_prefetcher=args.prefetcher,
+    #         interpolation=data_config['interpolation'],
+    #         mean=data_config['mean'],
+    #         std=data_config['std'],
+    #         num_workers=args.workers,
+    #         distributed=args.distributed,
+    #         crop_pct=data_config['crop_pct'],
+    #         pin_memory=args.pin_mem,
+    #     )
 
-    # setup loss function
+    dataloaders = get_dataloaders()
+    loader_train, loader_eval = dataloaders['train'], dataloaders['test']
+    # =======================
+    # =======================    # setup loss function
     if args.jsd:
         assert num_aug_splits > 1  # JSD only valid with aug splits set
         train_loss_fn = JsdCrossEntropy(num_splits=num_aug_splits, smoothing=args.smoothing).cuda()
@@ -686,8 +696,8 @@ def train_one_epoch(
             output = model(input)
 
             # ================================
-            # loss = loss_fn(output, target)
-            loss = model.get_loss(loss_fn, output, target)
+            loss = loss_fn(output, target)
+            # loss = model.get_loss(loss_fn, output, target)
             total_loss += loss.item()
             # ================================
 
@@ -696,10 +706,10 @@ def train_one_epoch(
 
         # print('len(input)', len(input))
         # print('num_of_data_train', num_of_data_train)
-        percentage = len(input) / num_of_data_train
-        acc1_color += acc1_for_each_label['color'] * percentage
-        acc1_gender += acc1_for_each_label['gender'] * percentage
-        acc1_article += acc1_for_each_label['article'] * percentage
+        # percentage = len(input) / num_of_data_train
+        # acc1_color += acc1_for_each_label['color'] * percentage
+        # acc1_gender += acc1_for_each_label['gender'] * percentage
+        # acc1_article += acc1_for_each_label['article'] * percentage
 
         # batch_accuracy_color, batch_accuracy_gender, batch_accuracy_article = model.calculate_metrics(output, target)
         #
@@ -777,8 +787,8 @@ def train_one_epoch(
 
     # ================================
     num_of_batches_per_epoch = len(loader)
-    print("epoch {:4d}, training loss: {:.4f}, accuracy_color: {:.4f}, accuracy_gender: {:.4f}, accuracy_article: {:.4f}\n".format(
-            epoch, total_loss / num_of_batches_per_epoch, acc1_color, acc1_gender, acc1_article))
+    print("epoch {:4d}, training loss: {:.4f}, accuracy_@1: {:.4f}, accuracy_@5: {:.4f}\n".format(
+            epoch, total_loss / num_of_batches_per_epoch, acc1, acc5, ))
 
     # print("epoch {:4d}, training loss: {:.4f}, accuracy_color: {:.4f}, accuracy_gender: {:.4f}, accuracy_article: {:.4f}\n".format(
     #     epoch,
@@ -833,18 +843,18 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
                 target = target[0:target.size(0):reduce_factor]
 
             # ================================
-            # loss = loss_fn(output, target)
-            loss = model.get_loss(loss_fn, output, target)
+            loss = loss_fn(output, target)
+            # loss = model.get_loss(loss_fn, output, target)
             total_loss += loss.item()
 
-            acc1, acc5, acc1_for_each_label = model.get_accuracy(accuracy, output, target, topk=(1, 2))
+            # acc1, acc5, acc1_for_each_label = model.get_accuracy(accuracy, output, target, topk=(1, 2))
 
             # print('len(input)', len(input))
             # print('num_of_data_val', num_of_data_val)
-            percentage = len(input) / num_of_data_val
-            acc1_color += acc1_for_each_label['color'] * percentage
-            acc1_gender += acc1_for_each_label['gender'] * percentage
-            acc1_article += acc1_for_each_label['article'] * percentage
+            # percentage = len(input) / num_of_data_val
+            # acc1_color += acc1_for_each_label['color'] * percentage
+            # acc1_gender += acc1_for_each_label['gender'] * percentage
+            # acc1_article += acc1_for_each_label['article'] * percentage
 
             # batch_accuracy_color, batch_accuracy_gender, batch_accuracy_article = model.calculate_metrics(output, target)
             #
@@ -852,8 +862,8 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
             # accuracy_gender += batch_accuracy_gender
             # accuracy_article += batch_accuracy_article
 
-            # acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            acc1, acc5, _ = model.get_accuracy(accuracy, output, target, topk=(1, 5))  # topk=(1, 2) ================================
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            # acc1, acc5, _ = model.get_accuracy(accuracy, output, target, topk=(1, 5))  # topk=(1, 2) ================================
             # ================================
 
             if args.distributed:
@@ -897,8 +907,8 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
     # accuracy_gender /= num_of_batches_per_epoch
     # accuracy_article /= num_of_batches_per_epoch
 
-    print("Validation loss: {:.4f}, accuracy_color: {:.4f}, accuracy_gender: {:.4f}, accuracy_article: {:.4f}\n"
-          .format(avg_loss, acc1_color, acc1_gender, acc1_article))
+    print("Validation loss: {:.4f}, accuracy_@1: {:.4f}, accuracy_@5: {:.4f},\n"
+          .format(avg_loss, acc1, acc5))
 
     # print("Validation loss: {:.4f}, accuracy_color: {:.4f}, accuracy_gender: {:.4f}, accuracy_article: {:.4f}\n"
     #       .format(avg_loss, accuracy_color, accuracy_gender, accuracy_article))
