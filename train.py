@@ -22,8 +22,8 @@ rxn.yang@gmail.com (out of China)
 """
 
 # ================================
-from timm.data import DatasetAttributes, DatasetML
-from timm.models import MultiLabelModel
+# from timm.data import DatasetAttributes, DatasetML
+# from timm.models import MultiLabelModel
 # ================================
 
 import argparse
@@ -48,8 +48,16 @@ from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 from timm.utils import ApexScaler, NativeScaler
 
-from prepare_d_loader_kaggle import get_dataloaders
-
+from prepare_d_loader_kaggle import get_dataloaders_kaggle
+from utils import choose_model
+from torchmetrics.classification import MultilabelF1Score
+# importing the sys module
+import sys        
+ 
+# appending the directory of mod.py
+# in the sys.path list
+sys.path.append('/raid/eprosvirin/img_clf')
+from prepare_d_loaders import get_dataloaders
 try:
     from apex import amp
     from apex.parallel import DistributedDataParallel as ApexDDP
@@ -96,7 +104,7 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='Resume full model and optimizer state from checkpoint (default: none)')
 parser.add_argument('--no-resume-opt', action='store_true', default=False,
                     help='prevent resume of optimizer state when resuming model')
-parser.add_argument('--num-classes', type=int, default=None, metavar='N',
+parser.add_argument('--num-classes', type=int, default=6, metavar='N',
                     help='number of label classes (Model default if None)')
 parser.add_argument('--gp', default=None, type=str, metavar='POOL',
                     help='Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
@@ -247,7 +255,7 @@ parser.add_argument('--model-ema-decay', type=float, default=0.9998,
 # Misc
 parser.add_argument('--seed', type=int, default=42, metavar='S',
                     help='random seed (default: 42)')
-parser.add_argument('--log-interval', type=int, default=50, metavar='N',
+parser.add_argument('--log-interval', type=int, default=1, metavar='N',
                     help='how many batches to wait before logging training status')
 parser.add_argument('--recovery-interval', type=int, default=0, metavar='N',
                     help='how many batches to wait before writing recovery checkpoint')
@@ -271,7 +279,7 @@ parser.add_argument('--no-prefetcher', action='store_true', default=False,
                     help='disable fast prefetcher')
 parser.add_argument('--output', default='', type=str, metavar='PATH',
                     help='path to output folder (default: none, current dir)')
-parser.add_argument('--eval-metric', default='top1', type=str, metavar='EVAL_METRIC',
+parser.add_argument('--eval-metric', default='F1', type=str, metavar='EVAL_METRIC',
                     help='Best metric (default: "top1"')
 parser.add_argument('--tta', type=int, default=0, metavar='N',
                     help='Test/inference time augmentation (oversampling) factor. 0=None (default: 0)')
@@ -280,6 +288,8 @@ parser.add_argument('--use-multi-epochs-loader', action='store_true', default=Fa
                     help='use the multi-epochs-loader to save time at the beginning of every epoch')
 parser.add_argument('--torchscript', dest='torchscript', action='store_true',
                     help='convert model torchscript for inference')
+parser.add_argument('--cuda_num', default = 'cuda:1',
+                    help='num of cuda for training')
 
 
 def _parse_args():
@@ -303,7 +313,6 @@ def main():
     print(' ')
     setup_default_logging()
     args, args_text = _parse_args()
-
     # ================================================================
     attributes_path = args.data_dir + '/all.csv'
     train_path = args.data_dir + '/train.csv'
@@ -314,7 +323,7 @@ def main():
     args.distributed = False
     if 'WORLD_SIZE' in os.environ:
         args.distributed = int(os.environ['WORLD_SIZE']) > 1
-    args.device = 'cuda:0'
+    args.device = args.cuda_num
     args.world_size = 1
     args.rank = 0  # global rank
     if args.distributed:
@@ -385,17 +394,17 @@ def main():
         model = convert_splitbn_model(model, max(num_aug_splits, 2))
 
     # move model to GPU, enable channels last layout if set
-    model.cuda()
+    model.to(args.device)
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last)
 
     # ================================
-    attributes = DatasetAttributes(attributes_path)
+#     attributes = DatasetAttributes(attributes_path)
 
-    model = MultiLabelModel(model,
-                            n_color_classes=attributes.num_colors,
-                            n_gender_classes=attributes.num_genders,
-                            n_article_classes=attributes.num_articles).cuda()
+#     model = MultiLabelModel(model,
+#                             n_color_classes=attributes.num_colors,
+#                             n_gender_classes=attributes.num_genders,
+#                             n_article_classes=attributes.num_articles).cuda()
 
     if args.local_rank == 0:
         _logger.info('Model %s created, param count: %d' %
@@ -571,8 +580,13 @@ def main():
     #         pin_memory=args.pin_mem,
     #     )
 
-    dataloaders = get_dataloaders()
+    dataloaders = get_dataloaders_kaggle()
+    dataloaders = get_dataloaders('underwear')
     loader_train, loader_eval = dataloaders['train'], dataloaders['test']
+    num_of_data_train = len(loader_train)*64
+    print('number of training data:', num_of_data_train)
+    num_of_data_val = len(loader_eval)*64
+    print('number of validation data:', num_of_data_val)
     # =======================
     # =======================    # setup loss function
     if args.jsd:
@@ -586,7 +600,9 @@ def main():
     else:
         train_loss_fn = nn.CrossEntropyLoss().cuda()
     validate_loss_fn = nn.CrossEntropyLoss().cuda()
-
+    print(train_loss_fn, validate_loss_fn)
+    train_loss_fn = nn.BCEWithLogitsLoss()
+    validate_loss_fn = nn.BCEWithLogitsLoss()
     # setup checkpoint saver and eval metric tracking
     eval_metric = args.eval_metric
     best_metric = None
@@ -655,7 +671,8 @@ def train_one_epoch(
         num_of_data_train, epoch, model, loader, optimizer, loss_fn, args,
         lr_scheduler=None, saver=None, output_dir='', amp_autocast=suppress,
         loss_scaler=None, model_ema=None, mixup_fn=None):
-
+    print("TRAINING")
+    f1 = MultilabelF1Score(num_labels=args.num_classes).to(args.device)
     if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
         if args.prefetcher and loader.mixup_enabled:
             loader.mixup_enabled = False
@@ -675,7 +692,6 @@ def train_one_epoch(
 
     # ================================
     total_loss = 0
-    acc1_color = acc1_gender = acc1_article = 0
     # accuracy_color = 0
     # accuracy_gender = 0
     # accuracy_article = 0
@@ -693,6 +709,8 @@ def train_one_epoch(
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
+            input=input.to(args.device)
+            target=target.to(args.device).to(torch.float32)
             output = model(input)
 
             # ================================
@@ -702,7 +720,10 @@ def train_one_epoch(
             # ================================
 
         # ================================
-        acc1, acc5, acc1_for_each_label = model.get_accuracy(accuracy, output, target, topk=(1, 2))
+        f1_score = f1(output, target).to(args.device)
+
+#         acc1, acc5 = accuracy(output, target, topk=(1, 5))
+#         acc1, acc5, acc1_for_each_label = model.get_accuracy(accuracy, output, target, topk=(1, 2))
 
         # print('len(input)', len(input))
         # print('num_of_data_train', num_of_data_train)
@@ -739,7 +760,7 @@ def train_one_epoch(
         if model_ema is not None:
             model_ema.update(model)
 
-        torch.cuda.synchronize()
+#         torch.cuda.synchronize()
         num_updates += 1
         batch_time_m.update(time.time() - end)
         if last_batch or batch_idx % args.log_interval == 0:
@@ -787,8 +808,10 @@ def train_one_epoch(
 
     # ================================
     num_of_batches_per_epoch = len(loader)
-    print("epoch {:4d}, training loss: {:.4f}, accuracy_@1: {:.4f}, accuracy_@5: {:.4f}\n".format(
-            epoch, total_loss / num_of_batches_per_epoch, acc1, acc5, ))
+#     print("epoch {:4d}, training loss: {:.4f}, accuracy_@1: {:.4f}, accuracy_@5: {:.4f}\n".format(
+#             epoch, total_loss / num_of_batches_per_epoch, acc1, acc5, ))
+    print("epoch {:4d}, training loss: {:.4f}, F1: {:.4f}, \n".format(
+            epoch, total_loss / num_of_batches_per_epoch, f1_score))
 
     # print("epoch {:4d}, training loss: {:.4f}, accuracy_color: {:.4f}, accuracy_gender: {:.4f}, accuracy_article: {:.4f}\n".format(
     #     epoch,
@@ -809,9 +832,10 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
     losses_m = AverageMeter()
     top1_m = AverageMeter()
     top5_m = AverageMeter()
+    f1_m = AverageMeter()
 
     model.eval()
-
+    f1 = MultilabelF1Score(num_labels=args.num_classes).to(args.device)
     end = time.time()
     last_idx = len(loader) - 1
     with torch.no_grad():
@@ -832,6 +856,8 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
                 input = input.contiguous(memory_format=torch.channels_last)
 
             with amp_autocast():
+                input=input.to(args.device)
+                target=target.to(args.device).to(torch.float32)
                 output = model(input)
             if isinstance(output, (tuple, list)):
                 output = output[0]
@@ -861,19 +887,20 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
             # accuracy_color += batch_accuracy_color
             # accuracy_gender += batch_accuracy_gender
             # accuracy_article += batch_accuracy_article
-
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            f1_score = f1(output, target).to(args.device)
+#             acc1, acc5 = accuracy(output, target, topk=(1, 5))
             # acc1, acc5, _ = model.get_accuracy(accuracy, output, target, topk=(1, 5))  # topk=(1, 2) ================================
             # ================================
 
             if args.distributed:
                 reduced_loss = reduce_tensor(loss.data, args.world_size)
-                acc1 = reduce_tensor(acc1, args.world_size)
-                acc5 = reduce_tensor(acc5, args.world_size)
+#                 acc1 = reduce_tensor(acc1, args.world_size)
+#                 acc5 = reduce_tensor(acc5, args.world_size)
+                f1_score = reduce_tensor(f1_score, args.world_size)
             else:
                 reduced_loss = loss.data
 
-            torch.cuda.synchronize()
+#             torch.cuda.synchronize()
 
             losses_m.update(reduced_loss.item(), input.size(0))
 
@@ -883,22 +910,30 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
 
             # ouput.size(0): output['color'].size(0) = input.size(0) = batch size
 
-            top1_m.update(acc1.item(), input.size(0))
-            top5_m.update(acc5.item(), input.size(0))
+#             top1_m.update(acc1.item(), input.size(0))
+#             top5_m.update(acc5.item(), input.size(0))
+            f1_m.update(f1_score.item(), input.size(0))
             # ================================
 
             batch_time_m.update(time.time() - end)
             end = time.time()
             if args.local_rank == 0 and (last_batch or batch_idx % args.log_interval == 0):
                 log_name = 'Test' + log_suffix
+#                 _logger.info(
+#                     '{0}: [{1:>4d}/{2}]  '
+#                     'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
+#                     'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '
+#                     'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
+#                     'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
+#                         log_name, batch_idx, last_idx, batch_time=batch_time_m,
+#                         loss=losses_m, top1=top1_m, top5=top5_m))
                 _logger.info(
                     '{0}: [{1:>4d}/{2}]  '
                     'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
                     'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '
-                    'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
-                    'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
+                    'F1: {F1.val:>7.4f} ({F1.avg:>7.4f})'.format(
                         log_name, batch_idx, last_idx, batch_time=batch_time_m,
-                        loss=losses_m, top1=top1_m, top5=top5_m))
+                        loss=losses_m, F1=f1_m))
 
     # ================================
     num_of_batches_per_epoch = len(loader)
@@ -907,14 +942,14 @@ def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppres
     # accuracy_gender /= num_of_batches_per_epoch
     # accuracy_article /= num_of_batches_per_epoch
 
-    print("Validation loss: {:.4f}, accuracy_@1: {:.4f}, accuracy_@5: {:.4f},\n"
-          .format(avg_loss, acc1, acc5))
+    print("Validation loss: {:.4f}, F1: {:.4f},\n"
+          .format(avg_loss, f1_score))
 
     # print("Validation loss: {:.4f}, accuracy_color: {:.4f}, accuracy_gender: {:.4f}, accuracy_article: {:.4f}\n"
     #       .format(avg_loss, accuracy_color, accuracy_gender, accuracy_article))
     # ================================
 
-    metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
+    metrics = OrderedDict([('loss', losses_m.avg), ('F1', f1_m.avg)])
 
     return metrics
 
