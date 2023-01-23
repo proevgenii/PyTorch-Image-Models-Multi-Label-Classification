@@ -290,6 +290,11 @@ parser.add_argument('--torchscript', dest='torchscript', action='store_true',
                     help='convert model torchscript for inference')
 parser.add_argument('--cuda_num', default = 'cuda:1',
                     help='num of cuda for training')
+parser.add_argument('--log-wandb', action='store_true', default=True,
+                   help='log training and validation metrics to wandb')
+parser.add_argument('--expiriment', action='store_true', default='multi_label_image_clf',
+                   help='expiriment name for wandb')
+
 
 
 def _parse_args():
@@ -625,6 +630,19 @@ def main():
             f.write(args_text)
 
     try:
+        import wandb
+        has_wandb = True
+    except ImportError:
+        has_wandb = False
+
+    if args.rank == 0 and args.log_wandb:
+        if has_wandb:
+            wandb.init(project=args.experiment, config=args)
+        else:
+            _logger.warning("You've requested to log metrics to wandb but package not found. "
+                            "Metrics not being logged to wandb, try `pip install wandb`")
+
+    try:
         for epoch in range(start_epoch, num_epochs):
             if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
@@ -654,7 +672,8 @@ def main():
 
             update_summary(
                 epoch, train_metrics, eval_metrics, lr, os.path.join(output_dir, 'summary.csv'),
-                write_header=best_metric is None)
+                write_header=best_metric is None,
+                log_wandb=args.log_wandb and has_wandb,)
 
             if saver is not None:
                 # save proper checkpoint with eval metric
