@@ -292,8 +292,8 @@ parser.add_argument('--cuda_num', default = 'cuda:1',
                     help='num of cuda for training')
 parser.add_argument('--log-wandb', action='store_true', default=True,
                    help='log training and validation metrics to wandb')
-parser.add_argument('--expiriment', action='store_true', default='multi_label_image_clf',
-                   help='expiriment name for wandb')
+parser.add_argument('--experiment', action='store_true', default='multi_label_image_clf',
+                   help='experiment name for wandb')
 
 
 
@@ -669,9 +669,13 @@ def main():
             if lr_scheduler is not None:
                 # step LR for next epoch
                 lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
-
+#             lrs = [param_group['lr'] for param_group in optimizer.param_groups]
             update_summary(
-                epoch, train_metrics, eval_metrics, lr, os.path.join(output_dir, 'summary.csv'),
+                epoch,
+                train_metrics,
+                eval_metrics,
+                lr = lr,
+                filename = os.path.join(output_dir, 'summary.csv'),
                 write_header=best_metric is None,
                 log_wandb=args.log_wandb and has_wandb,)
 
@@ -702,7 +706,7 @@ def train_one_epoch(
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
-
+    f1_m = AverageMeter()
     model.train()
 
     end = time.time()
@@ -740,7 +744,7 @@ def train_one_epoch(
 
         # ================================
         f1_score = f1(output, target).to(args.device)
-
+        f1_m.update(f1_score.item(), input.size(0))
 #         acc1, acc5 = accuracy(output, target, topk=(1, 5))
 #         acc1, acc5, acc1_for_each_label = model.get_accuracy(accuracy, output, target, topk=(1, 2))
 
@@ -842,8 +846,10 @@ def train_one_epoch(
 
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
-
-    return OrderedDict([('loss', losses_m.avg)]), lr
+    
+    metrics = OrderedDict([('loss', losses_m.avg), ('F1', f1_m.avg)])
+    
+    return metrics, lr
 
 
 def validate(num_of_data_val, model, loader, loss_fn, args, amp_autocast=suppress, log_suffix=''):

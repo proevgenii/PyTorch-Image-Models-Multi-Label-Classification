@@ -11,7 +11,10 @@ rxn.yang@gmail.com (out of China)
 import csv
 import os
 from collections import OrderedDict
-
+try: 
+    import wandb
+except ImportError:
+    pass
 
 def get_outdir(path, *paths, inc=False):
     outdir = os.path.join(path, *paths)
