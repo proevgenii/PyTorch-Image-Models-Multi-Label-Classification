@@ -34,6 +34,7 @@ import logging
 from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -43,13 +44,12 @@ from torch.nn.parallel import DistributedDataParallel as NativeDDP
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
 from timm.models import create_model, resume_checkpoint, load_checkpoint, convert_splitbn_model, model_parameters
 from timm.utils import *
+from timm import utils
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 from timm.utils import ApexScaler, NativeScaler
 
-from prepare_d_loader_kaggle import get_dataloaders_kaggle
-from utils import choose_model
 from torchmetrics.classification import MultilabelF1Score
 # importing the sys module
 import sys        
@@ -58,6 +58,8 @@ import sys
 # in the sys.path list
 sys.path.append('/raid/eprosvirin/img_clf')
 from prepare_d_loaders import get_dataloaders
+from prepare_d_loader_kaggle import get_dataloaders_kaggle
+from utils import choose_model, FocalLoss_with_alpha, focal_binary_cross_entropy
 try:
     from apex import amp
     from apex.parallel import DistributedDataParallel as ApexDDP
@@ -86,7 +88,7 @@ parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 
 # Dataset / Model parameters
-parser.add_argument('data_dir', metavar='DIR',
+parser.add_argument('--data_dir', default ='', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('--dataset', '-d', metavar='NAME', default='',
                     help='dataset type (default: ImageFolder/ImageTar if empty)')
@@ -288,14 +290,23 @@ parser.add_argument('--use-multi-epochs-loader', action='store_true', default=Fa
                     help='use the multi-epochs-loader to save time at the beginning of every epoch')
 parser.add_argument('--torchscript', dest='torchscript', action='store_true',
                     help='convert model torchscript for inference')
+#My additions
 parser.add_argument('--cuda_num', default = 'cuda:1',
                     help='num of cuda for training')
 parser.add_argument('--log-wandb', action='store_true', default=True,
                    help='log training and validation metrics to wandb')
 parser.add_argument('--experiment', action='store_true', default='multi_label_image_clf',
                    help='experiment name for wandb')
+parser.add_argument('--n_debarcle',  default=15, type=int,
+                   help='num layers to bebarcle')
+parser.add_argument('--weighted', action='store_true', default=False,
+                    help='use or not pos_weights in bce_loss, default False')
+parser.add_argument("--loss_fn", default='bce', type=str,
+                    help='Loss fn, possible values: `bce`, `ce`, `focal`, `focal_fun`')
 
-
+import os
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"]="1,2,3,4"
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -375,6 +386,15 @@ def main():
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
         checkpoint_path=args.initial_checkpoint)
+    
+    size = model.default_cfg['input_size'][-1]
+    mean = model.default_cfg['mean']
+    std = model.default_cfg['std']
+
+#     model = choose_model(model_name=args.model,
+#                          freeze=True,
+#                          num_cls=args.num_classes,
+#                          debarcle=args.n_debarcle)
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
@@ -414,6 +434,8 @@ def main():
     if args.local_rank == 0:
         _logger.info('Model %s created, param count: %d' %
                      (args.model, sum([m.numel() for m in model.parameters()])))
+        
+    print(f'Trainable params count: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
     # ================================
 
     # setup synchronized BatchNorm for distributed training
@@ -585,15 +607,18 @@ def main():
     #         pin_memory=args.pin_mem,
     #     )
 
-    dataloaders = get_dataloaders_kaggle()
-    dataloaders = get_dataloaders('underwear')
+#     dataloaders = get_dataloaders_kaggle()
+    name_data = 'underwear_addition_crop'
+    dataloaders = get_dataloaders(name_data, size=size, mean=mean, std=std)
     loader_train, loader_eval = dataloaders['train'], dataloaders['test']
     num_of_data_train = len(loader_train)*64
     print('number of training data:', num_of_data_train)
     num_of_data_val = len(loader_eval)*64
     print('number of validation data:', num_of_data_val)
     # =======================
-    # =======================    # setup loss function
+    # =======================
+    # setup loss function
+    print(f'Loss fn:{type(args.loss_fn), args.loss_fn}')
     if args.jsd:
         assert num_aug_splits > 1  # JSD only valid with aug splits set
         train_loss_fn = JsdCrossEntropy(num_splits=num_aug_splits, smoothing=args.smoothing).cuda()
@@ -602,12 +627,28 @@ def main():
         train_loss_fn = SoftTargetCrossEntropy().cuda()
     elif args.smoothing:
         train_loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing).cuda()
-    else:
+
+    if args.loss_fn == 'ce':
         train_loss_fn = nn.CrossEntropyLoss().cuda()
-    validate_loss_fn = nn.CrossEntropyLoss().cuda()
-    print(train_loss_fn, validate_loss_fn)
-    train_loss_fn = nn.BCEWithLogitsLoss()
-    validate_loss_fn = nn.BCEWithLogitsLoss()
+        validate_loss_fn = nn.CrossEntropyLoss().cuda()
+    elif args.loss_fn == 'bce':
+        if args.weighted:
+            weights_path = os.path.join('/raid/eprosvirin/img_clf/data', 'pos_weights_func_'+name_data+'.npy')
+            print(f'WEIGHTS PATH:{weights_path}')
+            class_weights = np.load(weights_path, allow_pickle= True)
+            class_weights = torch.tensor(class_weights,dtype=torch.float).to(args.device)
+        else: class_weights = None
+        train_loss_fn = nn.BCEWithLogitsLoss(pos_weight = class_weights)
+        validate_loss_fn = nn.BCEWithLogitsLoss(pos_weight = class_weights)
+    elif args.loss_fn =='focal':
+        train_loss_fn = FocalLoss_with_alpha(alpha=0.75, gamma=2, logits = True)
+        validate_loss_fn = FocalLoss_with_alpha(alpha=0.75, gamma=2, logits = True)
+    elif args.loss_fn == 'focal_fun':
+        train_loss_fn = focal_binary_cross_entropy
+        validate_loss_fn = focal_binary_cross_entropy
+
+    print(train_loss_fn)
+    print(validate_loss_fn)
     # setup checkpoint saver and eval metric tracking
     eval_metric = args.eval_metric
     best_metric = None
@@ -635,7 +676,8 @@ def main():
     except ImportError:
         has_wandb = False
 
-    if args.rank == 0 and args.log_wandb:
+#     if args.local_rank == 0 and args.log_wandb:
+    if utils.is_primary(args) and args.log_wandb:
         if has_wandb:
             wandb.init(project=args.experiment, config=args)
         else:
@@ -663,7 +705,8 @@ def main():
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                     distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
                 ema_eval_metrics = validate(
-                    num_of_data_val, model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, log_suffix=' (EMA)')
+                    num_of_data_val, model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast,
+                    log_suffix=' (EMA)')
                 eval_metrics = ema_eval_metrics
 
             if lr_scheduler is not None:
